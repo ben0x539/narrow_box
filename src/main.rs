@@ -1,10 +1,10 @@
-#![feature(extern_types, ptr_metadata, unsize)]
+#![feature(extern_types, ptr_metadata, unsize, coerce_unsized)]
 
 use std::fmt;
 use std::mem;
 use std::ptr::{self, Pointee};
 use std::marker::{Unsize, PhantomData};
-use std::ops::{Deref, DerefMut};
+use std::ops::{Deref, DerefMut, CoerceUnsized};
 use std::fmt::Debug;
 
 #[repr(transparent)] // <- i forgot if i want this
@@ -12,13 +12,16 @@ struct NarrowBox<Dyn: ?Sized>(ptr::NonNull<Opaque<Dyn>>);
 
 #[repr(C)]
 struct WrapUnsized<Dyn: ?Sized, T: ?Sized> {
-    metadata: <Dyn as Pointee>::Metadata,
+    metadata: <WrapUnsized<Dyn, Dyn> as Pointee>::Metadata,
     inner: T,
 }
 
+impl<Dyn: ?Sized, T> CoerceUnsized<WrapUnsized<Dyn, Dyn>> for WrapUnsized<Dyn, T>
+    where T: CoerceUnsized<Dyn> {}
+
 #[repr(C)]
 struct Opaque<Dyn: ?Sized> {
-    metadata: <Dyn as Pointee>::Metadata,
+    metadata: <WrapUnsized<Dyn, Dyn> as Pointee>::Metadata,
     _phantom: PhantomData<Dyn>,
     _extern: Extern, // idk if we even need this?
 }
@@ -33,13 +36,14 @@ fn synthesize_metadata<Dyn: ?Sized, T: Unsize<Dyn>>()
 }
 
 impl<Dyn: ?Sized> NarrowBox<Dyn> {
-    pub fn new_unsize<T>(inner: T) -> NarrowBox<Dyn> where T: Unsize<Dyn> {
-        let metadata = synthesize_metadata::<Dyn, T>();
+    fn new_unsize<T>(inner: T) -> NarrowBox<Dyn> where T: Unsize<Dyn> {
+        let metadata = synthesize_metadata::<
+            WrapUnsized<Dyn, Dyn>, WrapUnsized<Dyn, T>>();
         unsafe { Self::new_with_meta(inner, metadata) }
     }
 
-    pub fn new(inner: Dyn) -> NarrowBox<Dyn> where Dyn: Sized {
-        let metadata = ptr::metadata::<Dyn>(ptr::null());
+    fn new(inner: Dyn) -> NarrowBox<Dyn> where Dyn: Sized {
+        let metadata = ptr::metadata::<WrapUnsized<Dyn, Dyn>>(ptr::null());
         unsafe { Self::new_with_meta(inner, metadata) }
     }
 
@@ -51,21 +55,18 @@ impl<Dyn: ?Sized> NarrowBox<Dyn> {
     }
 
     // must be the right metadata
-    unsafe fn new_with_meta<T>(inner: T, metadata: <Dyn as Pointee>::Metadata)
-            -> NarrowBox<Dyn> {
-        let boxed: Box<WrapUnsized<Dyn, T>> =
-            Box::new(WrapUnsized { metadata, inner });
+    unsafe fn new_with_meta<T>(inner: T, metadata: <WrapUnsized<Dyn, Dyn> as Pointee>::Metadata) -> NarrowBox<Dyn> {
+        let boxed = Box::new(WrapUnsized { metadata, inner });
         let opaque = Box::into_raw(boxed) as *mut Opaque<Dyn>;
 
         NarrowBox(ptr::NonNull::new(opaque).unwrap())
     }
 
     fn wrapped(&self) -> *mut WrapUnsized<Dyn, Dyn> {
-        let p = self.0.as_ptr();
-        ptr::from_raw_parts_mut(
-            p as *mut (),
-            // safety: HOPEFULLY, i didnt read the rfc yet
-            unsafe { mem::transmute_copy(&(*p).metadata) })
+        unsafe {
+            let p = self.0.as_ptr();
+            ptr::from_raw_parts_mut(p as *mut (), (*p).metadata)
+        }
     }
 
     fn inner(&self) -> *mut Dyn {
