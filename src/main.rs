@@ -1,123 +1,76 @@
-#![feature(extern_types, ptr_metadata, unsize, option_result_unwrap_unchecked)]
+#![feature(extern_types, ptr_metadata, unsize, coerce_unsized)]
 
 use std::fmt;
 use std::mem;
 use std::ptr::{self, Pointee};
 use std::marker::{Unsize, PhantomData};
-use std::ops::{Deref, DerefMut};
+use std::ops::{Deref, DerefMut, CoerceUnsized};
 use std::fmt::Debug;
 
 #[repr(transparent)] // <- i forgot if i want this
 struct NarrowBox<Dyn: ?Sized>(ptr::NonNull<Opaque<Dyn>>);
 
 #[repr(C)]
-struct WrapUnsized<Dyn: ?Sized, T> {
-    metadata: <dyn DynWithDrop<Dyn> as Pointee>::Metadata,
+struct WrapUnsized<Dyn: ?Sized, T: ?Sized> {
+    metadata: <WrapUnsized<Dyn, Dyn> as Pointee>::Metadata,
     inner: T,
-    _phantom: PhantomData<Dyn>,
 }
+
+impl<Dyn: ?Sized, T> CoerceUnsized<WrapUnsized<Dyn, Dyn>> for WrapUnsized<Dyn, T>
+    where T: CoerceUnsized<Dyn> {}
 
 #[repr(C)]
 struct Opaque<Dyn: ?Sized> {
-    metadata: <dyn DynWithDrop<Dyn> as Pointee>::Metadata,
+    metadata: <WrapUnsized<Dyn, Dyn> as Pointee>::Metadata,
     _phantom: PhantomData<Dyn>,
     _extern: Extern, // idk if we even need this?
 }
 
 extern { type Extern; }
 
-// WrapUnsized's metadata for DynWithDrop effectively encodes
-// Dyn's metadata and its layout.
-trait DynWithDrop<Dyn: ?Sized> {
-    fn inner(&mut self) -> *mut Dyn;
-}
-
-impl<Dyn: ?Sized, T: Unsize<Dyn>> DynWithDrop<Dyn> for WrapUnsized<Dyn, T> {
-    fn inner(&mut self) -> *mut Dyn {
-        // we're unsizing from T to Dyn here
-        ptr::addr_of_mut!(self.inner)
-    }
+fn synthesize_metadata<Dyn: ?Sized, T: Unsize<Dyn>>()
+        -> <Dyn as Pointee>::Metadata {
+    let narrow_dummy: *const T = ptr::null();
+    let wide_dummy: *const Dyn = narrow_dummy;
+    ptr::metadata(wide_dummy)
 }
 
 impl<Dyn: ?Sized> NarrowBox<Dyn> {
-    fn new_unsize<T: Unsize<Dyn>>(inner: T) -> NarrowBox<Dyn> {
-        // synthesize vtable for thing we dont have yet.
-        // i'm sure this is safe.
-        let normal_ptr: *const WrapUnsized<Dyn, T> = ptr::null();
-        let wide_ptr: *const dyn DynWithDrop<Dyn> = normal_ptr;
-        let wide_ptr: *const (dyn DynWithDrop<Dyn>+'static) =
-            // Safety: metadata is probably the same regardless of lifetime
-            unsafe { mem::transmute(wide_ptr) }; // close enough
-
-        let metadata = ptr::metadata(wide_ptr);
-        let _phantom = PhantomData;
-
-        let transparent: WrapUnsized<Dyn, T> =
-            WrapUnsized { metadata, inner, _phantom };
-        let boxed = Box::new(transparent);
-        let transparent_metadata = ptr::addr_of!(boxed.metadata);
-        let opaque = Box::into_raw(boxed) as *mut Opaque<Dyn>;
-
-        unsafe {
-            // safety: i've done this in C for years, it must be fine
-            debug_assert_eq!(transparent_metadata as usize,
-                ptr::addr_of!((*opaque).metadata) as usize);
-        }
-
-        // safety: we just allocated it
-        unsafe { NarrowBox(ptr::NonNull::new_unchecked(opaque)) }
+    fn new_unsize<T>(inner: T) -> NarrowBox<Dyn> where T: Unsize<Dyn> {
+        let metadata = synthesize_metadata::<
+            WrapUnsized<Dyn, Dyn>, WrapUnsized<Dyn, T>>();
+        unsafe { Self::new_with_meta(inner, metadata) }
     }
 
     fn new(inner: Dyn) -> NarrowBox<Dyn> where Dyn: Sized {
-        assert!(Self::is_sized());
-        let boxed: *mut Dyn = Box::into_raw(Box::new(inner));
-        let opaque = boxed as *mut Opaque<Dyn>;
+        let metadata = ptr::metadata::<WrapUnsized<Dyn, Dyn>>(ptr::null());
+        unsafe { Self::new_with_meta(inner, metadata) }
+    }
+
+    // must be the right metadata
+    unsafe fn new_with_meta<T>(inner: T, metadata: <WrapUnsized<Dyn, Dyn> as Pointee>::Metadata) -> NarrowBox<Dyn> {
+        let boxed = Box::new(WrapUnsized { metadata, inner });
+        let opaque = Box::into_raw(boxed) as *mut Opaque<Dyn>;
 
         // safety: we just allocated it
-        unsafe { NarrowBox(ptr::NonNull::new_unchecked(opaque)) }
+        NarrowBox(ptr::NonNull::new_unchecked(opaque))
     }
 
-    fn is_sized() -> bool {
-        mem::size_of::<<Dyn as Pointee>::Metadata>() == 0
-    }
-
-    // only call if is_sized()
-    fn as_ptr(&self) -> *mut Dyn {
-        if Self::is_sized() {
+    fn wrapped(&self) -> *mut WrapUnsized<Dyn, Dyn> {
+        unsafe {
             let p = self.0.as_ptr();
-            // safety: it's the Box<Dyn> from back in new()
-            unsafe { mem::transmute_copy(&p) }
-        } else {
-            // safety: as_dyn_with_drop wouldn't do that to us
-            unsafe { (*self.as_dyn_with_drop()).inner() }
+            ptr::from_raw_parts_mut(p as *mut (), (*p).metadata)
         }
     }
 
-    // only call if not is_sized()
-    fn as_dyn_with_drop(&self) -> *mut dyn DynWithDrop<Dyn> {
-        assert!(!Self::is_sized());
-
-        let p = self.0.as_ptr();
-        // safety: p points at the WrapUnsized we created back in new_unsize,
-        // Opaque's metadata field is at the same address as WrapUnsized's,
-        // so they're the same and it's safe to grab
-        let metadata = unsafe { (*p).metadata };
-        ptr::from_raw_parts_mut(p as *mut (), metadata)
+    fn inner(&self) -> *mut Dyn {
+        unsafe { &mut (*self.wrapped()).inner }
     }
 }
 
 impl<Dyn: ?Sized> Drop for NarrowBox<Dyn> {
     fn drop(&mut self) {
-        if Self::is_sized() {
-            // safety: it's our Box from new
-            unsafe { Box::<Dyn>::from_raw(self.as_ptr()); }
-        } else {
-            unsafe {
-                let d = self.as_dyn_with_drop();
-                // safety: it's the Box from new_unsize
-                Box::from_raw(d);
-            }
-        }
+        unsafe { Box::from_raw(self.wrapped()); }
     }
 }
 
@@ -125,14 +78,14 @@ impl<Dyn: ?Sized> Deref for NarrowBox<Dyn> {
     type Target = Dyn;
     fn deref(&self) -> &Dyn {
         // safety: yes
-        unsafe { &*self.as_ptr() }
+        unsafe { &*self.inner() }
     }
 }
 
 impl<Dyn: ?Sized> DerefMut for NarrowBox<Dyn> {
     fn deref_mut(&mut self) -> &mut Dyn {
-        // safety: as_ptr doesnt return null, also we mut-borrow self rn
-        unsafe { &mut *self.as_ptr() }
+        // safety: inner doesnt return null, also we mut-borrow self rn
+        unsafe { &mut *self.inner() }
     }
 }
 
@@ -156,7 +109,17 @@ impl Drop for Loud {
     }
 }
 
+fn compare_meta<Dyn: ?Sized, T: Unsize<Dyn>>() {
+    unsafe {
+        let m1: usize = mem::transmute_copy(&synthesize_metadata::<Dyn, T>());
+        let m2: usize = mem::transmute_copy(&synthesize_metadata::<WrapUnsized<Dyn, Dyn>, WrapUnsized<Dyn, T>>());
+        assert_eq!(m1, m2);
+    }
+}
+
 fn main() {
+    compare_meta::<[i32], [i32; 5]>();
+    compare_meta::<dyn Debug, Loud>();
     let ary = [1, 2, 3, 4, 5, 6];
     let boxed: NarrowBox<[i32]> = NarrowBox::new_unsize(ary);
     println!("{}", mem::size_of_val(&boxed));
