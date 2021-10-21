@@ -33,14 +33,21 @@ fn synthesize_metadata<Dyn: ?Sized, T: Unsize<Dyn>>()
 }
 
 impl<Dyn: ?Sized> NarrowBox<Dyn> {
-    fn new_unsize<T>(inner: T) -> NarrowBox<Dyn> where T: Unsize<Dyn> {
+    pub fn new_unsize<T>(inner: T) -> NarrowBox<Dyn> where T: Unsize<Dyn> {
         let metadata = synthesize_metadata::<Dyn, T>();
         unsafe { Self::new_with_meta(inner, metadata) }
     }
 
-    fn new(inner: Dyn) -> NarrowBox<Dyn> where Dyn: Sized {
+    pub fn new(inner: Dyn) -> NarrowBox<Dyn> where Dyn: Sized {
         let metadata = ptr::metadata::<Dyn>(ptr::null());
         unsafe { Self::new_with_meta(inner, metadata) }
+    }
+
+    pub fn into_inner(self) -> Dyn where Dyn: Sized {
+        let self_ = mem::ManuallyDrop::new(self);
+        // safety: how could this go wrong
+        let boxed = unsafe { Box::from_raw(self_.wrapped()) };
+        boxed.inner
     }
 
     // must be the right metadata
@@ -50,8 +57,7 @@ impl<Dyn: ?Sized> NarrowBox<Dyn> {
             Box::new(WrapUnsized { metadata, inner });
         let opaque = Box::into_raw(boxed) as *mut Opaque<Dyn>;
 
-        // safety: we just allocated it
-        NarrowBox(ptr::NonNull::new_unchecked(opaque))
+        NarrowBox(ptr::NonNull::new(opaque).unwrap())
     }
 
     fn wrapped(&self) -> *mut WrapUnsized<Dyn, Dyn> {
@@ -121,15 +127,19 @@ fn main() {
     compare_meta::<dyn Debug, Loud>();
     let ary = [1, 2, 3, 4, 5, 6];
     let boxed: NarrowBox<[i32]> = NarrowBox::new_unsize(ary);
-    println!("{}", mem::size_of_val(&boxed));
+    println!("sizeof={}", mem::size_of_val(&boxed));
     println!("{:?}", boxed);
     let err = std::fs::read("/lmao").err().unwrap();
     let boxed: NarrowBox<dyn std::error::Error> = NarrowBox::new_unsize(err);
-    println!("{}", mem::size_of_val(&boxed));
+    println!("sizeof={}", mem::size_of_val(&boxed));
     println!("{:?}", boxed);
     NarrowBox::<dyn Debug>::new_unsize(Loud("neat".to_string()));
 
+    dbg!(mem::size_of::<WrapUnsized<dyn Debug, Loud>>());
+    dbg!(mem::size_of::<WrapUnsized<Loud, Loud>>());
+
     NarrowBox::new(Loud("sweet".to_string()));
-    let boxed = NarrowBox::new([1, 2, 3, 4]);
+    NarrowBox::new([1, 2, 3, 4]);
     println!("{:?}", boxed);
+    NarrowBox::new(Loud("ok!".to_string())).into_inner();
 }
