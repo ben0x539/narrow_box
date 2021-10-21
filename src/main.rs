@@ -1,27 +1,29 @@
 #![feature(extern_types, ptr_metadata, unsize, coerce_unsized)]
 
 use std::fmt;
-use std::mem;
-use std::ptr::{self, Pointee};
-use std::marker::{Unsize, PhantomData};
-use std::ops::{Deref, DerefMut, CoerceUnsized};
 use std::fmt::Debug;
+use std::marker::{PhantomData, Unsize};
+use std::mem;
+use std::ops::{CoerceUnsized, Deref, DerefMut};
+use std::ptr::{self, Pointee};
 
 #[repr(transparent)] // <- i forgot if i want this
 struct NarrowBox<Dyn: ?Sized>(ptr::NonNull<Opaque<Dyn>>);
 
 #[repr(C)]
 struct WrapUnsized<Dyn: ?Sized, T: ?Sized> {
-    metadata: <WrapUnsized<Dyn, Dyn> as Pointee>::Metadata,
+    metadata: WrapMeta<Dyn>,
     inner: T,
 }
+type WrapMeta<T> = <WrapUnsized<T, T> as Pointee>::Metadata;
 
-impl<Dyn: ?Sized, T> CoerceUnsized<WrapUnsized<Dyn, Dyn>> for WrapUnsized<Dyn, T>
+impl<Dyn: ?Sized, T> CoerceUnsized<WrapUnsized<Dyn, Dyn>>
+    for WrapUnsized<Dyn, T>
     where T: CoerceUnsized<Dyn> {}
 
 #[repr(C)]
 struct Opaque<Dyn: ?Sized> {
-    metadata: <WrapUnsized<Dyn, Dyn> as Pointee>::Metadata,
+    metadata: WrapMeta<Dyn>,
     _phantom: PhantomData<Dyn>,
     _extern: Extern, // idk if we even need this?
 }
@@ -55,7 +57,8 @@ impl<Dyn: ?Sized> NarrowBox<Dyn> {
     }
 
     // must be the right metadata
-    unsafe fn new_with_meta<T>(inner: T, metadata: <WrapUnsized<Dyn, Dyn> as Pointee>::Metadata) -> NarrowBox<Dyn> {
+    unsafe fn new_with_meta<T>(inner: T, metadata: WrapMeta<Dyn>)
+            -> NarrowBox<Dyn> {
         let boxed = Box::new(WrapUnsized { metadata, inner });
         let opaque = Box::into_raw(boxed) as *mut Opaque<Dyn>;
 
@@ -95,7 +98,7 @@ impl<Dyn: ?Sized> DerefMut for NarrowBox<Dyn> {
     }
 }
 
-impl<Dyn: ?Sized+Debug> Debug for NarrowBox<Dyn> {
+impl<Dyn: ?Sized + Debug> Debug for NarrowBox<Dyn> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         self.deref().fmt(f)
     }
@@ -109,7 +112,7 @@ struct Loud(String);
 
 impl Drop for Loud {
     fn drop(&mut self) {
-        println!("dropping {:?}", self);
+        eprintln!("dropping {:?}", self);
         assert!(self.0 != "oh no");
         self.0 = "oh no".to_string();
     }
@@ -128,12 +131,12 @@ fn main() {
     compare_meta::<dyn Debug, Loud>();
     let ary = [1, 2, 3, 4, 5, 6];
     let boxed: NarrowBox<[i32]> = NarrowBox::new_unsize(ary);
-    println!("sizeof={}", mem::size_of_val(&boxed));
-    println!("{:?}", boxed);
+    dbg!(mem::size_of_val(&boxed));
+    dbg!(boxed);
     let err = std::fs::read("/lmao").err().unwrap();
     let boxed: NarrowBox<dyn std::error::Error> = NarrowBox::new_unsize(err);
-    println!("sizeof={}", mem::size_of_val(&boxed));
-    println!("{:?}", boxed);
+    dbg!(mem::size_of_val(&boxed));
+    dbg!(boxed);
     NarrowBox::<dyn Debug>::new_unsize(Loud("neat".to_string()));
 
     dbg!(mem::size_of::<WrapUnsized<dyn Debug, Loud>>());
@@ -141,6 +144,5 @@ fn main() {
 
     NarrowBox::new(Loud("sweet".to_string()));
     NarrowBox::new([1, 2, 3, 4]);
-    println!("{:?}", boxed);
     NarrowBox::new(Loud("ok!".to_string())).into_inner();
 }
