@@ -1,4 +1,4 @@
-#![feature(extern_types, ptr_metadata, unsize, coerce_unsized)]
+#![feature(extern_types, ptr_metadata, unsize, coerce_unsized, test)]
 
 use std::fmt;
 use std::fmt::Debug;
@@ -145,4 +145,43 @@ fn main() {
     NarrowBox::new(Loud("sweet".to_string()));
     NarrowBox::new([1, 2, 3, 4]);
     NarrowBox::new(Loud("ok!".to_string())).into_inner();
+}
+
+extern crate test;
+use test::Bencher;
+#[bench]
+fn normal_box(b: &mut Bencher) {
+    b.iter(|| {
+        for _ in 0..(1<<16) {
+            let mut outer = Box::new([(); 10].map(|_| None));
+            for item in outer.iter_mut() {
+                *item = Some(Box::new(String::new()));
+            }
+            test::black_box(outer);
+
+            let mut outer: Box<[Option<Box<dyn Debug>>]> = Box::new([(); 10].map(|_| None));
+            for item in outer.iter_mut() {
+                *item = Some(Box::new("lol"));
+            }
+            test::black_box(outer);
+        }
+    });
+}
+#[bench]
+fn narrow_box(b: &mut Bencher) {
+    b.iter(|| {
+        for _ in 0..(1<<16) {
+            let mut outer = NarrowBox::new([(); 10].map(|_| None));
+            for item in outer.iter_mut() {
+                *item = Some(NarrowBox::new(String::new()));
+            }
+            test::black_box(outer);
+
+            let mut outer: NarrowBox<[Option<NarrowBox<dyn Debug>>]> = NarrowBox::new_unsize([(); 10].map(|_| None));
+            for item in outer.iter_mut() {
+                *item = Some(NarrowBox::new_unsize("lol"));
+            }
+            test::black_box(outer);
+        }
+    });
 }
